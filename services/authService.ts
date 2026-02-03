@@ -100,3 +100,52 @@ export const getCurrentUser = async (): Promise<User | null> => {
       if (firebaseUser) {
         const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
         if (userDoc.exists()) {
+          resolve(userDoc.data() as User);
+        } else {
+          resolve(null);
+        }
+      } else {
+        resolve(null);
+      }
+      unsubscribe(); // Limpa o listener
+    });
+  });
+};
+
+export const resetPassword = async (email: string) => {
+  try {
+    await sendPasswordResetEmail(auth, email);
+  } catch (error) {
+    throw new Error('Erro ao enviar email de recuperação.');
+  }
+};
+
+// --- Funções de Admin ---
+
+export const getAllUsers = async (): Promise<User[]> => {
+  const querySnapshot = await getDocs(collection(db, "users"));
+  const users: User[] = [];
+  querySnapshot.forEach((doc) => {
+    users.push(doc.data() as User);
+  });
+  return users;
+};
+
+export const toggleUserBlock = async (userId: string): Promise<void> => {
+  const userRef = doc(db, "users", userId);
+  const userSnap = await getDoc(userRef);
+  
+  if (userSnap.exists()) {
+    const userData = userSnap.data() as User;
+    
+    if (userData.role === 'admin') return; // Não bloqueia admin
+
+    await updateDoc(userRef, {
+      isBlocked: !userData.isBlocked
+    });
+  }
+};
+
+export const deleteUser = async (userId: string): Promise<void> => {
+  await deleteDoc(doc(db, "users", userId));
+};
