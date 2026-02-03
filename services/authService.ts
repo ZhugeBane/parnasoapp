@@ -19,6 +19,8 @@ import {
 import { auth, db } from "./firebaseConfig";
 import { User } from "../types";
 
+const ADMIN_EMAIL = 'admin@parnaso.com';
+
 // --- Funções Auxiliares ---
 
 export const checkUserExists = async (email: string): Promise<boolean> => {
@@ -40,10 +42,11 @@ export const register = async (name: string, email: string, password: string): P
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const firebaseUser = userCredential.user;
 
-    // Regra: Se for o email do chefe, vira admin. Senão, usuário comum.
-    const isAdmin = email === 'admin@parnaso.com';
+    const isAdmin = email === ADMIN_EMAIL;
+    
+    // Regra de Ouro: Se NÃO for admin, nasce BLOQUEADO.
     const role = isAdmin ? 'admin' : 'user';
-    const isBlocked = !isAdmin; // Admin nunca nasce bloqueado
+    const isBlocked = !isAdmin; 
 
     const newUser: User = {
       id: firebaseUser.uid,
@@ -57,6 +60,8 @@ export const register = async (name: string, email: string, password: string): P
 
     if (isBlocked) {
       await signOut(auth);
+      // O erro abaixo é intencional para avisar a interface
+      throw new Error('Cadastro realizado! Aguarde a aprovação do administrador.');
     }
 
     return newUser;
@@ -64,51 +69,56 @@ export const register = async (name: string, email: string, password: string): P
     if (error.code === 'auth/email-already-in-use') {
       throw new Error('E-mail já cadastrado.');
     }
+    // Repassa o erro de bloqueio para o front-end mostrar o aviso
     throw error;
   }
 };
 
-// --- AQUI ESTÁ A MÁGICA DA CORREÇÃO ---
 export const login = async (email: string, password: string): Promise<User> => {
   try {
+    // 1. Tenta logar no Firebase Auth
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const uid = userCredential.user.uid;
 
-    // AUTO-CORREÇÃO: Se for o email do Admin, forçamos a atualização no banco agora!
-    if (email === 'admin@parnaso.com') {
-      await setDoc(doc(db, "users", uid), {
-        role: 'admin',
-        isBlocked: false,
-        email: email
-      }, { merge: true }); // 'merge: true' atualiza sem apagar o resto
-    }
-
-    // Agora buscamos os dados atualizados
+    // 2. Busca o documento no Banco de Dados
     const userDocRef = doc(db, "users", uid);
     const userDoc = await getDoc(userDocRef);
 
-    if (!userDoc.exists()) {
-      // Se por algum milagre o documento não existir, criamos agora
-      const newUser: User = {
+    // --- CORREÇÃO DE SEGURANÇA E ADMIN ---
+    
+    // Se for o CHEFE, nós garantimos o acesso agora (Auto-Correção)
+    if (email === ADMIN_EMAIL) {
+      const adminData: User = {
         id: uid,
         name: 'Administrador',
-        email,
-        role: email === 'admin@parnaso.com' ? 'admin' : 'user',
+        email: email,
+        role: 'admin',
         isBlocked: false
       };
-      await setDoc(doc(db, "users", uid), newUser);
-      return newUser;
+      
+      // Força a gravação dos dados de Admin no banco (sobrescreve se estiver errado)
+      await setDoc(userDocRef, adminData, { merge: true });
+      return adminData;
     }
 
+    // Se NÃO for o chefe e não tiver documento no banco: ERRO.
+    // (Isso impede que "qualquer coisa entre")
+    if (!userDoc.exists()) {
+      await signOut(auth);
+      throw new Error("Erro de integridade: Usuário sem registro no banco de dados.");
+    }
+
+    // 3. Verifica Bloqueio
     const userData = userDoc.data() as User;
 
-    // Verificação de bloqueio (Segurança)
     if (userData.isBlocked) {
       await signOut(auth);
       throw new Error('Conta pendente de aprovação. Aguarde o administrador.');
     }
 
+    // Se passou por tudo, retorna o usuário limpo
     return userData;
+
   } catch (error: any) {
     if (error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
       throw new Error('E-mail ou senha inválidos.');
@@ -125,6 +135,18 @@ export const getCurrentUser = async (): Promise<User | null> => {
   return new Promise((resolve) => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        // Se for o admin, já retorna os dados forçados para evitar delay do banco
+        if (firebaseUser.email === ADMIN_EMAIL) {
+           resolve({
+             id: firebaseUser.uid,
+             name: 'Administrador',
+             email: firebaseUser.email!,
+             role: 'admin',
+             isBlocked: false
+           });
+           return;
+        }
+
         const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
         if (userDoc.exists()) {
           resolve(userDoc.data() as User);
@@ -164,7 +186,8 @@ export const toggleUserBlock = async (userId: string): Promise<void> => {
   
   if (userSnap.exists()) {
     const userData = userSnap.data() as User;
-    if (userData.role === 'admin') return;
+    // Proteção: Não pode bloquear o admin supremo
+    if (userData.email === ADMIN_EMAIL) return;
 
     await updateDoc(userRef, {
       isBlocked: !userData.isBlocked
@@ -173,5 +196,12 @@ export const toggleUserBlock = async (userId: string): Promise<void> => {
 };
 
 export const deleteUser = async (userId: string): Promise<void> => {
-  await deleteDoc(doc(db, "users", userId));
+  // Proteção extra: verificar se não é o admin antes de deletar
+  const userRef = doc(db, "users", userId);
+  const userSnap = await getDoc(userRef);
+  if (userSnap.exists()) {
+     const data = userSnap.data() as User;
+     if (data.email === ADMIN_EMAIL) throw new Error("Não é possível deletar o administrador principal.");
+  }
+  await deleteDoc(userRef);
 };
