@@ -2,7 +2,8 @@ import {
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
   signOut, 
-  updatePassword 
+  sendPasswordResetEmail,
+  onAuthStateChanged
 } from "firebase/auth";
 import { 
   doc, 
@@ -13,35 +14,35 @@ import {
   updateDoc, 
   deleteDoc 
 } from "firebase/firestore";
-import { auth, db } from "./firebaseConfig"; // Importa a config que criamos
+import { auth, db } from "./firebaseConfig";
 import { User } from "../types";
 
 // --- Funções de Autenticação ---
 
 export const register = async (name: string, email: string, password: string): Promise<User> => {
   try {
-    // 1. Cria o Login no Firebase Auth (Email/Senha)
+    // 1. Cria o Login no Firebase Auth
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const firebaseUser = userCredential.user;
 
-    // Lógica de Admin Hardcoded (mantida do seu código original)
+    // Lógica de Admin Hardcoded
     const isAdmin = email === 'admin@parnaso.com';
     const role = isAdmin ? 'admin' : 'user';
-    const isBlocked = !isAdmin; // Todos nascem bloqueados, exceto admin
+    // Se for admin, já nasce ativo. Se for user comum, nasce bloqueado (pending).
+    const isBlocked = !isAdmin;
 
     const newUser: User = {
-      id: firebaseUser.uid, // O ID agora vem do Firebase
+      id: firebaseUser.uid,
       name,
       email,
       role,
       isBlocked
     };
 
-    // 2. Salva os dados detalhados no Banco de Dados (Firestore)
-    // Isso é o que permite o Admin ver o usuário depois!
+    // 2. Salva no Firestore (Banco de Dados)
     await setDoc(doc(db, "users", firebaseUser.uid), newUser);
 
-    // Se estiver bloqueado, desloga imediatamente para não deixar entrar
+    // Se nasceu bloqueado, desloga para impedir acesso imediato
     if (isBlocked) {
       await signOut(auth);
     }
@@ -57,32 +58,34 @@ export const register = async (name: string, email: string, password: string): P
 
 export const login = async (email: string, password: string): Promise<User> => {
   try {
-    // 1. Faz o login no Auth
+    // 1. Autentica
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const uid = userCredential.user.uid;
 
-    // 2. Busca os dados do usuário no Banco para checar bloqueio
+    // 2. Busca dados no Firestore
     const userDocRef = doc(db, "users", uid);
     const userDoc = await getDoc(userDocRef);
 
     if (!userDoc.exists()) {
-      throw new Error("Usuário não encontrado no banco de dados.");
+      // Caso raro: usuário existe no Auth mas sem ficha no banco
+      throw new Error("Usuário sem registro no banco de dados.");
     }
 
     const userData = userDoc.data() as User;
 
-    // 3. Verifica se está bloqueado (Pending Approval)
+    // 3. Verifica bloqueio
     if (userData.isBlocked) {
-      await signOut(auth); // Desloga se tentar entrar
+      await signOut(auth);
       throw new Error('Conta pendente de aprovação. Aguarde o administrador.');
     }
 
     return userData;
   } catch (error: any) {
-    if (error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found') {
+    // Tratamento de erros comuns do Firebase
+    if (error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
       throw new Error('E-mail ou senha inválidos.');
     }
-    throw error; // Repassa o erro de bloqueio
+    throw error;
   }
 };
 
@@ -90,65 +93,10 @@ export const logout = async () => {
   await signOut(auth);
 };
 
-// Esta função verifica se o usuário logado está atualizado
 export const getCurrentUser = async (): Promise<User | null> => {
-  const firebaseUser = auth.currentUser;
-  if (!firebaseUser) return null;
-
-  const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
-  if (userDoc.exists()) {
-    return userDoc.data() as User;
-  }
-  return null;
-};
-
-// --- Password Recovery ---
-
-// O Firebase tem função nativa para isso, bem mais segura
-import { sendPasswordResetEmail } from "firebase/auth";
-
-export const resetPassword = async (email: string) => {
-  try {
-    await sendPasswordResetEmail(auth, email);
-    // O Firebase envia um link pro email da pessoa automaticamente
-  } catch (error) {
-    throw new Error('Erro ao enviar email de recuperação.');
-  }
-};
-
-// --- Admin Functions ---
-
-// Agora sim! Busca TODOS os documentos da coleção 'users' na nuvem
-export const getAllUsers = async (): Promise<User[]> => {
-  const querySnapshot = await getDocs(collection(db, "users"));
-  const users: User[] = [];
-  querySnapshot.forEach((doc) => {
-    users.push(doc.data() as User);
-  });
-  return users;
-};
-
-export const toggleUserBlock = async (userId: string): Promise<void> => {
-  // Busca o usuário atual para ver o status
-  const userRef = doc(db, "users", userId);
-  const userSnap = await getDoc(userRef);
-  
-  if (userSnap.exists()) {
-    const userData = userSnap.data() as User;
-    
-    // Proteção: não bloquear admin
-    if (userData.role === 'admin') return;
-
-    // Inverte o status no banco
-    await updateDoc(userRef, {
-      isBlocked: !userData.isBlocked
-    });
-  }
-};
-
-export const deleteUser = async (userId: string): Promise<void> => {
-    // Deleta do banco de dados (Visual)
-    await deleteDoc(doc(db, "users", userId));
-    // Nota: Deletar do Auth requer Cloud Functions (Backend), 
-    // mas deletar do banco já impede o login pelo nosso check no 'login'.
-};
+  // Promessa para esperar o Firebase verificar se tem alguém logado
+  return new Promise((resolve) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+        if (userDoc.exists()) {
