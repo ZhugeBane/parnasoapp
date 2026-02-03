@@ -21,7 +21,6 @@ import { User } from "../types";
 
 // --- Funções Auxiliares ---
 
-// ESTA É A FUNÇÃO QUE FALTAVA
 export const checkUserExists = async (email: string): Promise<boolean> => {
   try {
     const usersRef = collection(db, "users");
@@ -41,9 +40,10 @@ export const register = async (name: string, email: string, password: string): P
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const firebaseUser = userCredential.user;
 
+    // Regra: Se for o email do chefe, vira admin. Senão, usuário comum.
     const isAdmin = email === 'admin@parnaso.com';
     const role = isAdmin ? 'admin' : 'user';
-    const isBlocked = !isAdmin;
+    const isBlocked = !isAdmin; // Admin nunca nasce bloqueado
 
     const newUser: User = {
       id: firebaseUser.uid,
@@ -68,20 +68,41 @@ export const register = async (name: string, email: string, password: string): P
   }
 };
 
+// --- AQUI ESTÁ A MÁGICA DA CORREÇÃO ---
 export const login = async (email: string, password: string): Promise<User> => {
   try {
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     const uid = userCredential.user.uid;
 
+    // AUTO-CORREÇÃO: Se for o email do Admin, forçamos a atualização no banco agora!
+    if (email === 'admin@parnaso.com') {
+      await setDoc(doc(db, "users", uid), {
+        role: 'admin',
+        isBlocked: false,
+        email: email
+      }, { merge: true }); // 'merge: true' atualiza sem apagar o resto
+    }
+
+    // Agora buscamos os dados atualizados
     const userDocRef = doc(db, "users", uid);
     const userDoc = await getDoc(userDocRef);
 
     if (!userDoc.exists()) {
-      throw new Error("Usuário sem registro no banco de dados.");
+      // Se por algum milagre o documento não existir, criamos agora
+      const newUser: User = {
+        id: uid,
+        name: 'Administrador',
+        email,
+        role: email === 'admin@parnaso.com' ? 'admin' : 'user',
+        isBlocked: false
+      };
+      await setDoc(doc(db, "users", uid), newUser);
+      return newUser;
     }
 
     const userData = userDoc.data() as User;
 
+    // Verificação de bloqueio (Segurança)
     if (userData.isBlocked) {
       await signOut(auth);
       throw new Error('Conta pendente de aprovação. Aguarde o administrador.');
