@@ -1,123 +1,154 @@
-import { User } from '../types';
+import { 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signOut, 
+  updatePassword 
+} from "firebase/auth";
+import { 
+  doc, 
+  setDoc, 
+  getDoc, 
+  getDocs, 
+  collection, 
+  updateDoc, 
+  deleteDoc 
+} from "firebase/firestore";
+import { auth, db } from "./firebaseConfig"; // Importa a config que criamos
+import { User } from "../types";
 
-const USERS_KEY = 'parnaso_users';
-const CURRENT_USER_KEY = 'parnaso_current_user';
+// --- Funções de Autenticação ---
 
-export const register = (name: string, email: string, password: string): User => {
-  const usersStr = localStorage.getItem(USERS_KEY);
-  const users: User[] = usersStr ? JSON.parse(usersStr) : [];
+export const register = async (name: string, email: string, password: string): Promise<User> => {
+  try {
+    // 1. Cria o Login no Firebase Auth (Email/Senha)
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    const firebaseUser = userCredential.user;
 
-  const existingUser = users.find(u => u.email === email);
-  if (existingUser) {
-    throw new Error('E-mail já cadastrado.');
+    // Lógica de Admin Hardcoded (mantida do seu código original)
+    const isAdmin = email === 'admin@parnaso.com';
+    const role = isAdmin ? 'admin' : 'user';
+    const isBlocked = !isAdmin; // Todos nascem bloqueados, exceto admin
+
+    const newUser: User = {
+      id: firebaseUser.uid, // O ID agora vem do Firebase
+      name,
+      email,
+      role,
+      isBlocked
+    };
+
+    // 2. Salva os dados detalhados no Banco de Dados (Firestore)
+    // Isso é o que permite o Admin ver o usuário depois!
+    await setDoc(doc(db, "users", firebaseUser.uid), newUser);
+
+    // Se estiver bloqueado, desloga imediatamente para não deixar entrar
+    if (isBlocked) {
+      await signOut(auth);
+    }
+
+    return newUser;
+  } catch (error: any) {
+    if (error.code === 'auth/email-already-in-use') {
+      throw new Error('E-mail já cadastrado.');
+    }
+    throw error;
   }
-
-  // Hardcode admin role for specific email
-  const isAdmin = email === 'admin@parnaso.com';
-  const role = isAdmin ? 'admin' : 'user';
-
-  // New users (except admin) start blocked (Pending Approval)
-  const isBlocked = !isAdmin; 
-
-  const newUser: User = {
-    id: Date.now().toString(),
-    name,
-    email,
-    password, 
-    role,
-    isBlocked
-  };
-
-  users.push(newUser);
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  
-  // Auto login only if not blocked (Admin), otherwise throw message
-  if (!isBlocked) {
-    localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(newUser));
-  }
-  
-  return newUser;
 };
 
-export const login = (email: string, password: string): User => {
-  const usersStr = localStorage.getItem(USERS_KEY);
-  const users: User[] = usersStr ? JSON.parse(usersStr) : [];
+export const login = async (email: string, password: string): Promise<User> => {
+  try {
+    // 1. Faz o login no Auth
+    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    const uid = userCredential.user.uid;
 
-  const user = users.find(u => u.email === email && u.password === password);
-  
-  if (!user) {
-    throw new Error('E-mail ou senha inválidos.');
+    // 2. Busca os dados do usuário no Banco para checar bloqueio
+    const userDocRef = doc(db, "users", uid);
+    const userDoc = await getDoc(userDocRef);
+
+    if (!userDoc.exists()) {
+      throw new Error("Usuário não encontrado no banco de dados.");
+    }
+
+    const userData = userDoc.data() as User;
+
+    // 3. Verifica se está bloqueado (Pending Approval)
+    if (userData.isBlocked) {
+      await signOut(auth); // Desloga se tentar entrar
+      throw new Error('Conta pendente de aprovação. Aguarde o administrador.');
+    }
+
+    return userData;
+  } catch (error: any) {
+    if (error.code === 'auth/wrong-password' || error.code === 'auth/user-not-found') {
+      throw new Error('E-mail ou senha inválidos.');
+    }
+    throw error; // Repassa o erro de bloqueio
   }
-
-  if (user.isBlocked) {
-    throw new Error('Conta pendente de aprovação ou bloqueada pelo administrador.');
-  }
-
-  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
-  return user;
 };
 
-export const logout = () => {
-  localStorage.removeItem(CURRENT_USER_KEY);
+export const logout = async () => {
+  await signOut(auth);
 };
 
-export const getCurrentUser = (): User | null => {
-  const userStr = localStorage.getItem(CURRENT_USER_KEY);
-  if (!userStr) return null;
-  const user = JSON.parse(userStr);
-  
-  // Refresh user data from DB to check for blocks/role changes
-  const usersStr = localStorage.getItem(USERS_KEY);
-  const users: User[] = usersStr ? JSON.parse(usersStr) : [];
-  const freshUser = users.find(u => u.id === user.id);
-  
-  return freshUser || null;
+// Esta função verifica se o usuário logado está atualizado
+export const getCurrentUser = async (): Promise<User | null> => {
+  const firebaseUser = auth.currentUser;
+  if (!firebaseUser) return null;
+
+  const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
+  if (userDoc.exists()) {
+    return userDoc.data() as User;
+  }
+  return null;
 };
 
 // --- Password Recovery ---
 
-export const checkUserExists = (email: string): boolean => {
-  const usersStr = localStorage.getItem(USERS_KEY);
-  const users: User[] = usersStr ? JSON.parse(usersStr) : [];
-  return users.some(u => u.email === email);
-};
+// O Firebase tem função nativa para isso, bem mais segura
+import { sendPasswordResetEmail } from "firebase/auth";
 
-export const resetPassword = (email: string, newPassword: string) => {
-  const usersStr = localStorage.getItem(USERS_KEY);
-  const users: User[] = usersStr ? JSON.parse(usersStr) : [];
-  
-  const index = users.findIndex(u => u.email === email);
-  if (index === -1) {
-    throw new Error('Usuário não encontrado.');
+export const resetPassword = async (email: string) => {
+  try {
+    await sendPasswordResetEmail(auth, email);
+    // O Firebase envia um link pro email da pessoa automaticamente
+  } catch (error) {
+    throw new Error('Erro ao enviar email de recuperação.');
   }
-
-  users[index].password = newPassword;
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
 };
 
 // --- Admin Functions ---
 
-export const getAllUsers = (): User[] => {
-  const usersStr = localStorage.getItem(USERS_KEY);
-  return usersStr ? JSON.parse(usersStr) : [];
-};
-
-export const toggleUserBlock = (userId: string): User[] => {
-  const users = getAllUsers();
-  const index = users.findIndex(u => u.id === userId);
-  if (index !== -1) {
-    // Don't block admin
-    if (users[index].role === 'admin') return users;
-    
-    users[index].isBlocked = !users[index].isBlocked;
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  }
+// Agora sim! Busca TODOS os documentos da coleção 'users' na nuvem
+export const getAllUsers = async (): Promise<User[]> => {
+  const querySnapshot = await getDocs(collection(db, "users"));
+  const users: User[] = [];
+  querySnapshot.forEach((doc) => {
+    users.push(doc.data() as User);
+  });
   return users;
 };
 
-export const deleteUser = (userId: string): User[] => {
-  const users = getAllUsers();
-  const newUsers = users.filter(u => u.id !== userId);
-  localStorage.setItem(USERS_KEY, JSON.stringify(newUsers));
-  return newUsers;
+export const toggleUserBlock = async (userId: string): Promise<void> => {
+  // Busca o usuário atual para ver o status
+  const userRef = doc(db, "users", userId);
+  const userSnap = await getDoc(userRef);
+  
+  if (userSnap.exists()) {
+    const userData = userSnap.data() as User;
+    
+    // Proteção: não bloquear admin
+    if (userData.role === 'admin') return;
+
+    // Inverte o status no banco
+    await updateDoc(userRef, {
+      isBlocked: !userData.isBlocked
+    });
+  }
+};
+
+export const deleteUser = async (userId: string): Promise<void> => {
+    // Deleta do banco de dados (Visual)
+    await deleteDoc(doc(db, "users", userId));
+    // Nota: Deletar do Auth requer Cloud Functions (Backend), 
+    // mas deletar do banco já impede o login pelo nosso check no 'login'.
 };
