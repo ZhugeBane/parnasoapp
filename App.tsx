@@ -16,7 +16,7 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [settings, setSettings] = useState<UserSettings>(INITIAL_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
-  
+   
   // Inspection State (Admin viewing another user)
   const [inspectingUser, setInspectingUser] = useState<User | null>(null);
   const [inspectingData, setInspectingData] = useState<{ sessions: WritingSession[], projects: Project[], settings: UserSettings } | null>(null);
@@ -24,33 +24,47 @@ function App() {
   // To hold data passed from Focus Mode to Form
   const [prefilledData, setPrefilledData] = useState<Partial<WritingSession>>({});
 
-  // Initialize App and Check for User
+  // Initialize App and Check for User (ASYNC UPDATE)
   useEffect(() => {
-    const currentUser = getCurrentUser();
-    if (currentUser) {
-      handleLoginSuccess(currentUser);
-    } else {
-      setIsLoading(false);
-    }
+    const checkLogin = async () => {
+      try {
+        const currentUser = await getCurrentUser();
+        if (currentUser) {
+          await handleLoginSuccess(currentUser);
+        } else {
+          setIsLoading(false);
+        }
+      } catch (error) {
+        console.error("Erro ao verificar login:", error);
+        setIsLoading(false);
+      }
+    };
+    checkLogin();
   }, []);
 
-  const handleLoginSuccess = (loggedInUser: User) => {
+  const handleLoginSuccess = async (loggedInUser: User) => {
     setUser(loggedInUser);
     
     // Configure services to use this user's data
     setServiceUserId(loggedInUser.id);
     
     // Load their data
-    setSessions(getSessions());
-    setSettings(getSettings());
-    setProjects(getProjects());
+    // Nota: Se o sessionService ainda for localStorage, o await não atrapalha.
+    // Se mudarmos para Firebase no futuro, já está pronto.
+    const userSessions = await getSessions();
+    const userSettings = await getSettings();
+    const userProjects = await getProjects();
+
+    setSessions(userSessions);
+    setSettings(userSettings);
+    setProjects(userProjects);
     
     setView('dashboard');
     setIsLoading(false);
   };
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     setUser(null);
     setSessions([]); // Clear state for security
     setProjects([]);
@@ -95,16 +109,16 @@ function App() {
 
   const handleFocusExit = (sessionData?: { startTime: string; endTime: string }) => {
     if (sessionData) {
-       // If exiting with data (timer finished/stopped manually for logging), go to form
-       setPrefilledData({
-         startTime: sessionData.startTime,
-         endTime: sessionData.endTime,
-         wasMultitasking: false // Assume focus mode means single tasking
-       });
-       setView('form');
+        // If exiting with data (timer finished/stopped manually for logging), go to form
+        setPrefilledData({
+          startTime: sessionData.startTime,
+          endTime: sessionData.endTime,
+          wasMultitasking: false // Assume focus mode means single tasking
+        });
+        setView('form');
     } else {
-       // Just closing without logging
-       setView('dashboard');
+        // Just closing without logging
+        setView('dashboard');
     }
   };
 
@@ -132,7 +146,7 @@ function App() {
   };
 
   if (isLoading) {
-    return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-400">Carregando...</div>;
+    return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-400">Carregando Parnaso...</div>;
   }
 
   if (!user) {
@@ -205,7 +219,7 @@ function App() {
           onSocial={handleSocialPanel}
         />
       )}
-      
+       
       {view === 'form' && (
         <div className="animate-fade-in">
           <SessionForm 
