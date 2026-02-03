@@ -49,7 +49,7 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  password?: string; // In a real app, never store plain text passwords
+  password?: string; // Not used with Firebase, keeping for type compatibility
   role: 'admin' | 'user';
   isBlocked?: boolean;
 }
