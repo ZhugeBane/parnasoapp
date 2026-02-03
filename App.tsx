@@ -49,8 +49,6 @@ function App() {
     setServiceUserId(loggedInUser.id);
     
     // Load their data
-    // Nota: Se o sessionService ainda for localStorage, o await não atrapalha.
-    // Se mudarmos para Firebase no futuro, já está pronto.
     const userSessions = await getSessions();
     const userSettings = await getSettings();
     const userProjects = await getProjects();
@@ -131,7 +129,6 @@ function App() {
   const handleInspectUser = (targetUser: User, data: { sessions: WritingSession[], projects: Project[], settings: UserSettings }) => {
     setInspectingUser(targetUser);
     setInspectingData(data);
-    // Don't change view, we will conditionally render Dashboard with read-only props inside the Admin logic or main flow
   };
 
   const handleCloseInspection = () => {
